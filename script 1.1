@@ -1,0 +1,144 @@
+const BASE_URL = "https://brasilapi.com.br/api/fipe";
+const CHAVE_RECENTES = "fipe_recentes";
+ 
+const $ = (id) => document.getElementById(id);
+const form = $("form"), inputCodigo = $("codigo"), selectTabela = $("tabela"), btn = $("btn");
+const loading = $("loading"), erro = $("erro"), resumo = $("resumo"), resultado = $("resultado");
+const vazio = $("vazio"), recentesBox = $("recentes");
+ 
+// Evita injeção de HTML vindo da API
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+ 
+function setLoading(ativo) {
+  loading.hidden = !ativo;
+  btn.disabled = ativo;
+  btn.textContent = ativo ? "Consultando..." : "Consultar preço";
+}
+ 
+function mostrarErro(msg) {
+  erro.textContent = msg;
+  erro.hidden = false;
+}
+ 
+async function buscar(url) {
+  let resp;
+  try {
+    resp = await fetch(url);
+  } catch (e) {
+    console.error("Falha de rede:", e);
+    throw new Error("Não foi possível conectar à BrasilAPI. Verifique sua internet e tente novamente.");
+  }
+  if (!resp.ok) {
+    let detalhe = "";
+    try { detalhe = (await resp.json()).message || ""; } catch { /* resposta sem JSON */ }
+    console.error("Erro da API:", resp.status, detalhe);
+    if (resp.status === 400 || resp.status === 404) {
+      throw new Error(`Código FIPE não encontrado${detalhe ? ` (${detalhe})` : ""}. Use o formato 001004-9.`);
+    }
+    throw new Error(`A BrasilAPI está com problema (HTTP ${resp.status}). Tente novamente em instantes.`);
+  }
+  return resp.json();
+}
+ 
+// Aceita "0010049", "001004 9", "001004-9" e devolve "001004-9"
+function normalizarCodigo(texto) {
+  const limpo = texto.replace(/[^0-9a-zA-Z]/g, "").toUpperCase();
+  return limpo.length > 1 ? `${limpo.slice(0, -1)}-${limpo.slice(-1)}` : limpo;
+}
+ 
+/* ---------- Recentes (localStorage, com tratamento de falha) ---------- */
+function lerRecentes() {
+  try { return JSON.parse(localStorage.getItem(CHAVE_RECENTES)) || []; } catch { return []; }
+}
+function salvarRecente(codigo) {
+  try {
+    const lista = [codigo, ...lerRecentes().filter((c) => c !== codigo)].slice(0, 5);
+    localStorage.setItem(CHAVE_RECENTES, JSON.stringify(lista));
+  } catch { /* sem armazenamento disponível */ }
+  renderRecentes();
+}
+function renderRecentes() {
+  const lista = lerRecentes();
+  recentesBox.querySelectorAll(".chip").forEach((c) => c.remove());
+  recentesBox.hidden = lista.length === 0;
+  lista.forEach((codigo) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.textContent = codigo;
+    chip.addEventListener("click", () => { inputCodigo.value = codigo; form.requestSubmit(); });
+    recentesBox.appendChild(chip);
+  });
+}
+ 
+/* ---------- Tabelas de referência ---------- */
+async function carregarTabelas() {
+  try {
+    const tabelas = await buscar(`${BASE_URL}/tabelas/v1`);
+    tabelas.slice(0, 12).forEach((t) => {
+      const op = document.createElement("option");
+      op.value = t.codigo;
+      op.textContent = t.mes.trim();
+      selectTabela.appendChild(op);
+    });
+  } catch (e) {
+    console.warn("Não foi possível carregar as tabelas:", e.message);
+  }
+}
+ 
+/* ---------- Renderização ---------- */
+function renderizar(dados) {
+  const veiculos = Array.isArray(dados) ? dados : [dados];
+  const v0 = veiculos[0] || {};
+  const mes = String(v0.mesReferencia ?? "").trim();
+  const tipos = { 1: "Carro", 2: "Moto", 3: "Caminhão" };
+ 
+  resumo.innerHTML = `<h2>${esc(v0.marca ?? "")} ${esc(v0.modelo ?? "")}</h2>
+    <p>Código FIPE ${esc(v0.codigoFipe ?? "")}${mes ? ` · Referência: ${esc(mes)}` : ""}</p>`;
+  resumo.hidden = false;
+ 
+  resultado.innerHTML = veiculos.map((v) => {
+    const data = v.dataConsulta ? new Date(v.dataConsulta) : null;
+    const dataTxt = data && !isNaN(data) ? data.toLocaleDateString("pt-BR") : "—";
+    return `
+    <article class="card">
+      <span class="badge">${v.anoModelo === 32000 ? "Zero km" : esc(v.anoModelo ?? "—")}</span>
+      <div class="preco">${esc(v.valor ?? "—")}</div>
+      <dl>
+        <dt>Combustível</dt><dd>${esc(v.combustivel ?? "—")}</dd>
+        <dt>Tipo</dt><dd>${esc(tipos[v.tipoVeiculo] ?? "—")}</dd>
+        <dt>Consultado em</dt><dd>${esc(dataTxt)}</dd>
+      </dl>
+    </article>`;
+  }).join("");
+}
+ 
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const codigo = normalizarCodigo(inputCodigo.value.trim());
+  inputCodigo.value = codigo;
+  erro.hidden = true;
+  resumo.hidden = true;
+  resultado.innerHTML = "";
+ 
+  if (!codigo) { mostrarErro("Informe o código FIPE do veículo."); return; }
+ 
+  vazio.hidden = true;
+  setLoading(true);
+  const tabela = selectTabela.value ? `?tabela_referencia=${selectTabela.value}` : "";
+ 
+  try {
+    const dados = await buscar(`${BASE_URL}/preco/v1/${encodeURIComponent(codigo)}${tabela}`);
+    renderizar(dados);
+    salvarRecente(codigo);
+  } catch (err) {
+    console.error(err);
+    mostrarErro(err.message);
+    vazio.hidden = false;
+  } finally {
+    setLoading(false);
+  }
+});
+ 
+carregarTabelas();
+renderRecentes();
